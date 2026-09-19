@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Card,
@@ -21,54 +21,142 @@ import {
   ArrowLeftOutlined,
 } from '@ant-design/icons'
 import { ebookApi } from '../api/ebook'
-import type { Ebook } from '../types'
+import { orderApi } from '../api/order'
+import type { PageContent, ReaderSession } from '../types'
 
-const { Title } = Typography
+const { Title, Paragraph } = Typography
 
 function EbookReader() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const [ebook, setEbook] = useState<Ebook | null>(null)
+  const [session, setSession] = useState<ReaderSession | null>(null)
+  const [pageContent, setPageContent] = useState<PageContent | null>(null)
   const [loading, setLoading] = useState(false)
-  const [currentPage, setCurrentPage] = useState(1)
+  const [paying, setPaying] = useState(false)
+  const [denied, setDenied] = useState<string | null>(null)
+  const [attemptedPage, setAttemptedPage] = useState<number | null>(null)
   const [fontSize, setFontSize] = useState(16)
   const [nightMode, setNightMode] = useState(false)
   const [bookmarks, setBookmarks] = useState<number[]>([])
   const [settingsVisible, setSettingsVisible] = useState(false)
 
-  useEffect(() => {
-    if (id) {
-      loadEbook()
-    }
-  }, [id])
+  /**
+   * 读取某一页。试读边界、是否已购完全由服务端判定：
+   * 无论翻页、重新打开还是直接访问阅读入口，越界请求都只会得到拒绝而不是正文。
+   */
+  const loadPage = useCallback(
+    async (page: number, showError = true) => {
+      if (!id) return
+      setLoading(true)
+      setDenied(null)
+      try {
+        const res = await ebookApi.getPage(id, page)
+        const body = res.data
+        if (body && body.success === false) {
+          setDenied(body.message || '试读范围到此结束，购买后可阅读全文')
+          setPageContent(null)
+          return
+        }
+        const data: PageContent = body?.data ?? body
+        setPageContent(data)
+        setAttemptedPage(null)
+        setSession((prev) =>
+          prev ? { ...prev, currentPage: data.page, purchased: data.purchased } : prev
+        )
+      } catch (error: any) {
+        const msg =
+          error?.response?.data?.message || '试读范围到此结束，购买后可阅读全文'
+        if (showError) message.error(msg)
+        setDenied(msg)
+        setAttemptedPage(page)
+        setPageContent(null)
+      } finally {
+        setLoading(false)
+      }
+    },
+    [id]
+  )
 
-  const loadEbook = async () => {
+  useEffect(() => {
     if (!id) return
+    let cancelled = false
     setLoading(true)
-    try {
-      const res = await ebookApi.getById(id)
-      setEbook(res.data?.data || res.data)
-    } catch (error) {
-      console.error('Failed to load ebook:', error)
-    } finally {
-      setLoading(false)
+    ebookApi
+      .openReader(id)
+      .then((res) => {
+        if (cancelled) return
+        const body = res.data
+        const data: ReaderSession = body?.data ?? body
+        setSession(data)
+        // 续读页码由服务端按授权收敛，未购买者不可能从越界页开始
+        loadPage(data.currentPage || 1, false)
+      })
+      .catch((error) => {
+        if (cancelled) return
+        const msg = error?.response?.data?.message || '无法打开该电子书'
+        setDenied(msg)
+        message.error(msg)
+        setLoading(false)
+      })
+    return () => {
+      cancelled = true
     }
-  }
+  }, [id, loadPage])
 
   const toggleBookmark = () => {
-    if (bookmarks.includes(currentPage)) {
-      setBookmarks(bookmarks.filter((p) => p !== currentPage))
+    if (!session) return
+    const page = pageContent?.page ?? session.currentPage
+    if (bookmarks.includes(page)) {
+      setBookmarks(bookmarks.filter((p) => p !== page))
       message.info('已取消书签')
     } else {
-      setBookmarks([...bookmarks, currentPage])
+      setBookmarks([...bookmarks, page])
       message.success('已添加书签')
     }
   }
 
-  const totalPages = ebook?.pageCount || 100
-  const sampleEndPage = Math.floor(totalPages * (ebook?.sampleEndPercent || 0.1))
+  /** 下单 + 支付为同一闭环：幂等下单，支付成功后立即解锁并回读当前页 */
+  const handlePurchaseAndPay = async () => {
+    if (!id) return
+    setPaying(true)
+    try {
+      const orderRes = await orderApi.createEbookOrder(id)
+      const orderBody = orderRes.data
+      const order = orderBody?.data ?? orderBody
+      const payRes = await orderApi.pay(order.id, 'SUCCESS')
+      const payBody = payRes.data
+      if (payBody && payBody.success === false) {
+        message.error(payBody.message || '支付失败')
+        return
+      }
+      const paid = payBody?.data ?? payBody
+      if (paid.status !== 'PAID') {
+        message.error('支付未完成，请稍后重试')
+        return
+      }
+      message.success('支付成功，已解锁全文')
+      setSession((prev) =>
+        prev ? { ...prev, purchased: true, currentPage: attemptedPage ?? pageContent?.page ?? 1 } : prev
+      )
+      // 支付成功后立即解锁：回到刚才被拦的那一页
+      loadPage(attemptedPage ?? pageContent?.page ?? 1)
+    } catch (error: any) {
+      message.error(error?.response?.data?.message || '支付失败，请稍后重试')
+    } finally {
+      setPaying(false)
+    }
+  }
 
-  const canRead = currentPage <= sampleEndPage
+  const goPage = (page: number) => {
+    if (!session) return
+    if (page < 1 || page > session.pageCount) return
+    loadPage(page)
+  }
+
+  const currentPage = pageContent?.page ?? session?.currentPage ?? 1
+  const maxPage = session?.pageCount ?? 1
+  // 未购买时服务端只允许试读页；next 按钮同样不能越过边界
+  const lockedBoundary = session ? (session.purchased ? maxPage : session.sampleEndPage) : 1
 
   const fontSizeOptions = [
     { value: 12, label: '小' },
@@ -78,7 +166,7 @@ function EbookReader() {
     { value: 20, label: '大' },
   ]
 
-  if (loading || !ebook) {
+  if (loading && !session) {
     return <Spin style={{ display: 'flex', justifyContent: 'center', marginTop: 100 }} />
   }
 
@@ -95,11 +183,11 @@ function EbookReader() {
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Space>
-            <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(`/ebooks/${ebook.id}`)}>
+            <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(`/ebooks/${id}`)}>
               返回
             </Button>
             <Title level={4} style={{ margin: 0 }}>
-              {ebook.title}
+              {session?.title}
             </Title>
           </Space>
           <Space>
@@ -133,28 +221,38 @@ function EbookReader() {
           lineHeight: 1.8,
         }}
       >
-        {canRead ? (
+        {pageContent ? (
           <div style={{ maxWidth: 800, margin: '0 auto' }}>
             <div style={{ textAlign: 'center', marginBottom: 32 }}>
-              <h2>第 {currentPage} 页</h2>
+              <h2>第 {pageContent.page} 页</h2>
             </div>
-            <p style={{ textIndent: '2em' }}>
-              这是《{ebook.title}》的第 {currentPage} 页内容。在实际应用中，这里会显示真实的电子书内容。
-              阅读器支持翻页、字体大小调节、夜间模式、书签标记和阅读进度记忆等功能。
+            <p style={{ textIndent: '2em', whiteSpace: 'pre-wrap' }}>
+              {pageContent.content}
             </p>
-            <p style={{ textIndent: '2em' }}>
-              前 {sampleEndPage} 页可免费试读，完整内容需要购买后才能阅读。
-            </p>
+            {pageContent.sample && (
+              <Paragraph type="secondary" style={{ marginTop: 32, textAlign: 'center' }}>
+                试读范围：前 {session?.sampleEndPage} 页（全书共 {pageContent.pageCount} 页的 10%）
+              </Paragraph>
+            )}
           </div>
         ) : (
           <div style={{ textAlign: 'center', padding: 100 }}>
-            <Title level={3}>试读结束</Title>
+            <Title level={3}>
+              {session?.purchased ? '内容不可用' : '试读结束'}
+            </Title>
             <p style={{ margin: '24px 0' }}>
-              您已阅读到试读部分的末尾，购买后可继续阅读完整内容。
+              {denied || '您已阅读到试读部分的末尾，购买后可继续阅读完整内容。'}
             </p>
-            <Button type="primary" size="large" onClick={() => navigate(`/ebooks/${ebook.id}`)}>
-              购买整本电子书
-            </Button>
+            {!session?.purchased && (
+              <Button
+                type="primary"
+                size="large"
+                loading={paying}
+                onClick={handlePurchaseAndPay}
+              >
+                购买并解锁整本电子书
+              </Button>
+            )}
           </div>
         )}
       </div>
@@ -164,17 +262,18 @@ function EbookReader() {
           <Button
             disabled={currentPage <= 1}
             icon={<LeftOutlined />}
-            onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
+            onClick={() => goPage(currentPage - 1)}
           >
             上一页
           </Button>
           <span>
-            第 {currentPage} / {totalPages} 页
+            第 {currentPage} / {maxPage} 页
+            {session && !session.purchased && `（试读到第 ${session.sampleEndPage} 页）`}
           </span>
           <Button
-            disabled={currentPage >= sampleEndPage}
+            disabled={currentPage >= lockedBoundary}
             icon={<RightOutlined />}
-            onClick={() => setCurrentPage(currentPage + 1)}
+            onClick={() => goPage(currentPage + 1)}
           >
             下一页
           </Button>

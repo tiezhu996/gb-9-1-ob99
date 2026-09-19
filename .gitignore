@@ -1,0 +1,12 @@
+# build output
+backend/target/
+frontend/dist/
+
+# dependencies
+frontend/node_modules/
+
+# env
+.env
+
+# logs
+*.log

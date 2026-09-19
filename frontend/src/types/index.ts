@@ -86,8 +86,27 @@ export interface Ebook {
   pageCount?: number
   wordCount?: number
   sampleEndPercent: number
-  status: 'DRAFT' | 'PUBLISHED'
+  status: 'DRAFT' | 'PUBLISHED' | 'OFFLINE'
   createdAt: string
+}
+
+export interface ReaderSession {
+  ebookId: string
+  title: string
+  pageCount: number
+  sampleEndPage: number
+  purchased: boolean
+  offShelf: boolean
+  sampleEndPercent: number
+  currentPage: number
+}
+
+export interface PageContent {
+  page: number
+  pageCount: number
+  content: string
+  purchased: boolean
+  sample: boolean
 }
 
 export interface Order {

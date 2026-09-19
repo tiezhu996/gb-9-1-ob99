@@ -12,6 +12,7 @@ function MyOrders() {
   const [invoiceModalVisible, setInvoiceModalVisible] = useState(false)
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null)
   const [invoiceLoading, setInvoiceLoading] = useState(false)
+  const [payingId, setPayingId] = useState<string | null>(null)
   const [form] = Form.useForm()
 
   useEffect(() => {
@@ -43,6 +44,24 @@ function MyOrders() {
       console.error('Invoice request failed:', error)
     } finally {
       setInvoiceLoading(false)
+    }
+  }
+
+  const handlePay = async (order: Order) => {
+    setPayingId(order.id)
+    try {
+      const res = await orderApi.pay(order.id, 'SUCCESS')
+      const paid = res.data?.data
+      if (res.data?.success === false || paid?.status !== 'PAID') {
+        message.error(res.data?.message || '支付失败')
+        return
+      }
+      message.success('支付成功')
+      loadOrders()
+    } catch (error) {
+      console.error('Pay failed:', error)
+    } finally {
+      setPayingId(null)
     }
   }
 
@@ -118,7 +137,12 @@ function MyOrders() {
       render: (_: any, record: Order) => (
         <Space>
           {record.status === 'PENDING' && (
-            <Button type="primary" size="small">
+            <Button
+              type="primary"
+              size="small"
+              loading={payingId === record.id}
+              onClick={() => handlePay(record)}
+            >
               去支付
             </Button>
           )}

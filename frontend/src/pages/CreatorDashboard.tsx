@@ -35,11 +35,11 @@ function CreatorDashboard() {
       const [columnsRes, audioRes, ebooksRes] = await Promise.all([
         columnApi.list({ size: 10 }),
         audioApi.list({ size: 10 }),
-        ebookApi.list({ size: 10 }),
+        ebookApi.listMine(),
       ])
       setColumns(columnsRes.data?.data?.content || columnsRes.data || [])
       setAudio(audioRes.data?.data?.content || audioRes.data || [])
-      setEbooks(ebooksRes.data?.data?.content || ebooksRes.data || [])
+      setEbooks(ebooksRes.data?.data || ebooksRes.data || [])
     } catch (error) {
       console.error('Failed to load dashboard data:', error)
     } finally {
@@ -83,7 +83,11 @@ function CreatorDashboard() {
     setSubmitting(true)
     try {
       const values = await ebookForm.validateFields()
-      await ebookApi.create(values)
+      const contentPages = String(values.contentPages || '')
+        .split('\n')
+        .map((line: string) => line.trim())
+        .filter((line: string) => line.length > 0)
+      await ebookApi.create({ ...values, contentPages })
       message.success('电子书创建成功')
       setEbookModalVisible(false)
       ebookForm.resetFields()
@@ -92,6 +96,16 @@ function CreatorDashboard() {
       console.error('Create ebook failed:', error)
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const handleOfflineEbook = async (ebookId: string) => {
+    try {
+      await ebookApi.offline(ebookId)
+      message.success('电子书已下架，已购读者仍可继续阅读')
+      loadData()
+    } catch (error) {
+      console.error('Offline ebook failed:', error)
     }
   }
 
@@ -193,15 +207,33 @@ function CreatorDashboard() {
                   <Button type="link" key="view" onClick={() => navigate(`/ebooks/${item.id}`)}>
                     查看
                   </Button>,
+                  ...(item.status !== 'OFFLINE'
+                    ? [
+                        <Button
+                          type="link"
+                          danger
+                          key="offline"
+                          onClick={() => handleOfflineEbook(item.id)}
+                        >
+                          下架
+                        </Button>,
+                      ]
+                    : []),
                 ]}
               >
                 <List.Item.Meta
                   avatar={<Avatar icon={<ReadOutlined />} style={{ background: '#13c2c2' }} />}
-                  title={item.title}
+                  title={
+                    <span>
+                      {item.title}{' '}
+                      {item.status === 'OFFLINE' && <Tag color="red">已下架</Tag>}
+                    </span>
+                  }
                   description={
                     <div>
                       <Tag color="cyan">¥{item.price}</Tag>
                       <Tag>{item.fileType}</Tag>
+                      {item.pageCount != null && <Tag>{item.pageCount} 页</Tag>}
                     </div>
                   }
                 />
@@ -296,6 +328,14 @@ function CreatorDashboard() {
               <Select.Option value="PDF">PDF</Select.Option>
               <Select.Option value="EPUB">EPUB</Select.Option>
             </Select>
+          </Form.Item>
+          <Form.Item
+            name="contentPages"
+            label="全书正文（每行一页，平台按实际页数计算前 10% 试读范围）"
+            rules={[{ required: true, message: '请至少填写一页正文，每行代表一页' }]}
+            extra="例如填写 100 行即 100 页，未购买读者只能读取前 10 页。"
+          >
+            <TextArea rows={8} placeholder={'第 1 页内容…\n第 2 页内容…'} />
           </Form.Item>
         </Form>
       </Modal>
