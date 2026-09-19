@@ -83,8 +83,27 @@ function CreatorDashboard() {
     setSubmitting(true)
     try {
       const values = await ebookForm.validateFields()
-      await ebookApi.create(values)
-      message.success('电子书创建成功')
+      // 每页一行（空行分段），页数与字数由后端按实际内容计算
+      const pages = (values.pagesText as string)
+        .split(/\n=====\n/)
+        .map((p: string) => p.trim())
+        .filter(Boolean)
+      if (pages.length === 0) {
+        message.error('请至少填写一页正文（多页之间用单独一行 ===== 分隔）')
+        return
+      }
+      const created = await ebookApi.create({
+        title: values.title,
+        description: values.description,
+        price: Number(values.price),
+        fileType: values.fileType,
+        pages,
+      })
+      message.success('电子书创建成功，已自动发布')
+      const ebookId = created.data?.data?.id
+      if (ebookId) {
+        await ebookApi.publish(ebookId).catch(() => undefined)
+      }
       setEbookModalVisible(false)
       ebookForm.resetFields()
       loadData()
@@ -92,6 +111,16 @@ function CreatorDashboard() {
       console.error('Create ebook failed:', error)
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const handleOfflineEbook = async (ebookId: string) => {
+    try {
+      await ebookApi.offline(ebookId)
+      message.success('已下架')
+      loadData()
+    } catch (error) {
+      console.error('Offline ebook failed:', error)
     }
   }
 
@@ -193,15 +222,34 @@ function CreatorDashboard() {
                   <Button type="link" key="view" onClick={() => navigate(`/ebooks/${item.id}`)}>
                     查看
                   </Button>,
+                  ...(item.status !== 'OFFLINE'
+                    ? [
+                        <Button
+                          type="link"
+                          danger
+                          key="offline"
+                          onClick={() => handleOfflineEbook(item.id)}
+                        >
+                          下架
+                        </Button>,
+                      ]
+                    : []),
                 ]}
               >
                 <List.Item.Meta
                   avatar={<Avatar icon={<ReadOutlined />} style={{ background: '#13c2c2' }} />}
-                  title={item.title}
+                  title={
+                    <span>
+                      {item.title}{' '}
+                      {item.status === 'OFFLINE' && <Tag color="red">已下架</Tag>}
+                      {item.status === 'DRAFT' && <Tag>草稿</Tag>}
+                    </span>
+                  }
                   description={
                     <div>
                       <Tag color="cyan">¥{item.price}</Tag>
                       <Tag>{item.fileType}</Tag>
+                      {item.pageCount != null && <Tag>{item.pageCount}页</Tag>}
                     </div>
                   }
                 />
@@ -296,6 +344,14 @@ function CreatorDashboard() {
               <Select.Option value="PDF">PDF</Select.Option>
               <Select.Option value="EPUB">EPUB</Select.Option>
             </Select>
+          </Form.Item>
+          <Form.Item
+            name="pagesText"
+            label="正文内容（每页一段，多页之间用单独一行 ===== 分隔）"
+            rules={[{ required: true, message: '请填写正文内容' }]}
+            extra="试读前 10% 按实际页数计算，例如 20 页则免费试读前 2 页。"
+          >
+            <TextArea rows={10} placeholder={'第一页正文……\n=====\n第二页正文……'} />
           </Form.Item>
         </Form>
       </Modal>

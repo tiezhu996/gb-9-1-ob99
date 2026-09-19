@@ -8,7 +8,9 @@ export const orderApi = {
   create: (data: { type: string; itemId: string; plan?: string }) =>
     api.post('/orders', data),
 
-  pay: (orderId: string) => api.post(`/orders/${orderId}/pay`),
+  // 确认支付；fail=true 模拟支付失败（订单保持待支付，不产生已购状态）
+  pay: (orderId: string, fail?: boolean) =>
+    api.post(`/orders/${orderId}/pay`, { fail: fail ?? false }),
 
   requestInvoice: (orderId: string, data: any) =>
     api.post(`/orders/${orderId}/invoice`, data),

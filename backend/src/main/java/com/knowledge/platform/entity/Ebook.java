@@ -1,5 +1,6 @@
 package com.knowledge.platform.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Data;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.index.Indexed;
@@ -8,6 +9,7 @@ import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Data
 @Document(collection = "ebooks")
@@ -38,6 +40,13 @@ public class Ebook {
 
     private Integer wordCount;
 
+    /**
+     * 全书实际正文内容，按页存储。试读边界和阅读授权都以这份实际内容为准，
+     * 不直接随电子书详情对外暴露，只能通过带授权校验的阅读接口获取。
+     */
+    @JsonIgnore
+    private List<String> pages;
+
     private Double sampleEndPercent = 0.1;
 
     private Status status = Status.DRAFT;
@@ -53,6 +62,8 @@ public class Ebook {
 
     public enum Status {
         DRAFT,
-        PUBLISHED
+        PUBLISHED,
+        // 作者下架：新购买被拒绝，已购读者仍可继续阅读
+        OFFLINE
     }
 }

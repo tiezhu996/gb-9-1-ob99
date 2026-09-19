@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Card,
@@ -7,9 +7,9 @@ import {
   Switch,
   Select,
   Typography,
-  message,
   Spin,
   Modal,
+  Result,
 } from 'antd'
 import {
   LeftOutlined,
@@ -21,14 +21,17 @@ import {
   ArrowLeftOutlined,
 } from '@ant-design/icons'
 import { ebookApi } from '../api/ebook'
-import type { Ebook } from '../types'
+import type { EbookPageAccess } from '../types'
 
-const { Title } = Typography
+const { Title, Paragraph } = Typography
 
 function EbookReader() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const [ebook, setEbook] = useState<Ebook | null>(null)
+  const [access, setAccess] = useState<EbookPageAccess | null>(null)
+  const [content, setContent] = useState<string>('')
+  const [locked, setLocked] = useState(false)
+  const [denied, setDenied] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
   const [fontSize, setFontSize] = useState(16)
@@ -36,39 +39,95 @@ function EbookReader() {
   const [bookmarks, setBookmarks] = useState<number[]>([])
   const [settingsVisible, setSettingsVisible] = useState(false)
 
-  useEffect(() => {
-    if (id) {
-      loadEbook()
-    }
-  }, [id])
+  const totalPages = access?.totalPages ?? 0
+  const sampleEndPage = access?.sampleEndPage ?? 0
+  const purchased = access?.purchased ?? false
 
-  const loadEbook = async () => {
+  // 每一页都向服务端请求并由服务端授权。
+  // 翻页、重新打开阅读器、直接在地址栏输入超界页码，都会走同一校验，无法越过试读边界。
+  const loadPage = useCallback(
+    async (page: number) => {
+      if (!id) return
+      setLoading(true)
+      try {
+        const res = await ebookApi.getPage(id, page)
+        const body = res.data?.data
+        if (res.data?.success && body && !body.locked) {
+          setAccess((prev) => ({ ...(prev as EbookPageAccess), ...body }))
+          setContent(body.content || '')
+          setLocked(false)
+          setCurrentPage(page)
+          localStorage.setItem(`ebook-progress:${id}`, String(page))
+        } else {
+          // 服务端拒绝（越过试读边界），不渲染任何正文
+          if (body) {
+            setAccess((prev) => ({ ...(prev as EbookPageAccess), ...body }))
+          }
+          setContent('')
+          setLocked(true)
+          setCurrentPage(page)
+        }
+      } catch (error: any) {
+        const body = error.response?.data?.data
+        const msg = error.response?.data?.message
+        if (body && typeof body.purchased === 'boolean') {
+          setAccess((prev) => ({ ...(prev as EbookPageAccess), ...body }))
+          setContent('')
+          setLocked(true)
+          setCurrentPage(body.page || page)
+        } else {
+          // 下架/不存在：整个阅读入口不可用
+          setDenied(msg || '无法阅读该电子书')
+        }
+      } finally {
+        setLoading(false)
+      }
+    },
+    [id]
+  )
+
+  useEffect(() => {
     if (!id) return
-    setLoading(true)
-    try {
-      const res = await ebookApi.getById(id)
-      setEbook(res.data?.data || res.data)
-    } catch (error) {
-      console.error('Failed to load ebook:', error)
-    } finally {
-      setLoading(false)
-    }
+    ;(async () => {
+      setLoading(true)
+      try {
+        const res = await ebookApi.getAccess(id)
+        const acc: EbookPageAccess = res.data?.data
+        if (!res.data?.success || !acc) {
+          setDenied(res.data?.message || '无法阅读该电子书')
+          setLoading(false)
+          return
+        }
+        setAccess(acc)
+        setBookmarks(JSON.parse(localStorage.getItem(`ebook-bookmarks:${id}`) || '[]'))
+
+        // 恢复上次阅读进度（重新打开）。恢复的页码同样要经服务端授权，
+        // 未购买读者即使本地存了更大的页码，也只能被挡在试读边界。
+        const saved = parseInt(localStorage.getItem(`ebook-progress:${id}`) || '1', 10)
+        const startPage = acc.purchased
+          ? Math.min(Math.max(saved, 1), acc.totalPages || 1)
+          : Math.min(Math.max(saved, 1), Math.max(acc.sampleEndPage, 1))
+        await loadPage(startPage)
+      } catch (error: any) {
+        setDenied(error.response?.data?.message || '无法阅读该电子书')
+      } finally {
+        setLoading(false)
+      }
+    })()
+  }, [id, loadPage])
+
+  const goPage = (page: number) => {
+    if (page < 1 || page > totalPages) return
+    loadPage(page)
   }
 
   const toggleBookmark = () => {
-    if (bookmarks.includes(currentPage)) {
-      setBookmarks(bookmarks.filter((p) => p !== currentPage))
-      message.info('已取消书签')
-    } else {
-      setBookmarks([...bookmarks, currentPage])
-      message.success('已添加书签')
-    }
+    const next = bookmarks.includes(currentPage)
+      ? bookmarks.filter((p) => p !== currentPage)
+      : [...bookmarks, currentPage]
+    setBookmarks(next)
+    localStorage.setItem(`ebook-bookmarks:${id}`, JSON.stringify(next))
   }
-
-  const totalPages = ebook?.pageCount || 100
-  const sampleEndPage = Math.floor(totalPages * (ebook?.sampleEndPercent || 0.1))
-
-  const canRead = currentPage <= sampleEndPage
 
   const fontSizeOptions = [
     { value: 12, label: '小' },
@@ -78,9 +137,29 @@ function EbookReader() {
     { value: 20, label: '大' },
   ]
 
-  if (loading || !ebook) {
+  if (denied) {
+    return (
+      <Result
+        status="warning"
+        title="无法阅读"
+        subTitle={denied}
+        extra={
+          <Button type="primary" onClick={() => navigate(`/ebooks/${id}`)}>
+            返回电子书详情
+          </Button>
+        }
+      />
+    )
+  }
+
+  if (loading || !access) {
     return <Spin style={{ display: 'flex', justifyContent: 'center', marginTop: 100 }} />
   }
+
+  // 未购买读者“下一页”按钮在试读最后一页即禁用；
+  // 即便绕过按钮（直接改 URL/状态），服务端也不会返回超界正文。
+  const canGoNext = currentPage < totalPages && (purchased || currentPage < sampleEndPage)
+  const canGoPrev = currentPage > 1
 
   return (
     <div style={{ padding: 0 }}>
@@ -95,11 +174,11 @@ function EbookReader() {
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Space>
-            <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(`/ebooks/${ebook.id}`)}>
+            <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(`/ebooks/${id}`)}>
               返回
             </Button>
             <Title level={4} style={{ margin: 0 }}>
-              {ebook.title}
+              {access.title}
             </Title>
           </Space>
           <Space>
@@ -107,6 +186,7 @@ function EbookReader() {
               icon={<PushpinOutlined />}
               onClick={toggleBookmark}
               type={bookmarks.includes(currentPage) ? 'primary' : 'default'}
+              disabled={locked}
             >
               书签
             </Button>
@@ -133,49 +213,47 @@ function EbookReader() {
           lineHeight: 1.8,
         }}
       >
-        {canRead ? (
-          <div style={{ maxWidth: 800, margin: '0 auto' }}>
-            <div style={{ textAlign: 'center', marginBottom: 32 }}>
-              <h2>第 {currentPage} 页</h2>
-            </div>
-            <p style={{ textIndent: '2em' }}>
-              这是《{ebook.title}》的第 {currentPage} 页内容。在实际应用中，这里会显示真实的电子书内容。
-              阅读器支持翻页、字体大小调节、夜间模式、书签标记和阅读进度记忆等功能。
-            </p>
-            <p style={{ textIndent: '2em' }}>
-              前 {sampleEndPage} 页可免费试读，完整内容需要购买后才能阅读。
-            </p>
-          </div>
-        ) : (
+        {locked ? (
           <div style={{ textAlign: 'center', padding: 100 }}>
             <Title level={3}>试读结束</Title>
-            <p style={{ margin: '24px 0' }}>
-              您已阅读到试读部分的末尾，购买后可继续阅读完整内容。
-            </p>
-            <Button type="primary" size="large" onClick={() => navigate(`/ebooks/${ebook.id}`)}>
+            <Paragraph style={{ margin: '24px 0' }}>
+              免费试读范围为全书前
+              {Math.round((sampleEndPage / Math.max(totalPages, 1)) * 100)}%
+              （第 1-{sampleEndPage} 页，共 {totalPages} 页）。您当前请求的是第 {currentPage} 页，
+              购买后可继续阅读完整内容。
+            </Paragraph>
+            <Button type="primary" size="large" onClick={() => navigate(`/ebooks/${id}`)}>
               购买整本电子书
             </Button>
+          </div>
+        ) : (
+          <div style={{ maxWidth: 800, margin: '0 auto' }}>
+            <div style={{ textAlign: 'center', marginBottom: 32 }}>
+              <h2>
+                第 {currentPage} 页{purchased ? '' : ' · 试读'}
+              </h2>
+            </div>
+            {content.split('\n').map((para, i) =>
+              para.trim() ? (
+                <p key={i} style={{ textIndent: '2em' }}>
+                  {para}
+                </p>
+              ) : null
+            )}
           </div>
         )}
       </div>
 
       <Card style={{ position: 'sticky', bottom: 0 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Button
-            disabled={currentPage <= 1}
-            icon={<LeftOutlined />}
-            onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
-          >
+          <Button disabled={!canGoPrev} icon={<LeftOutlined />} onClick={() => goPage(currentPage - 1)}>
             上一页
           </Button>
           <span>
             第 {currentPage} / {totalPages} 页
+            {!purchased && `（试读到第 ${sampleEndPage} 页）`}
           </span>
-          <Button
-            disabled={currentPage >= sampleEndPage}
-            icon={<RightOutlined />}
-            onClick={() => setCurrentPage(currentPage + 1)}
-          >
+          <Button disabled={!canGoNext} icon={<RightOutlined />} onClick={() => goPage(currentPage + 1)}>
             下一页
           </Button>
         </div>

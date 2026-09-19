@@ -6,6 +6,7 @@ spring:
     mongodb:
       uri: ${SPRING_DATA_MONGODB_URI:mongodb://admin:admin123@localhost:2804/knowledge_platform?authSource=admin}
       database: ${SPRING_DATA_MONGODB_DATABASE:knowledge_platform}
+      auto-index-creation: true
 
     redis:
       host: ${SPRING_REDIS_HOST:localhost}
@@ -19,7 +20,7 @@ spring:
       max-request-size: 500MB
 
 server:
-  port: 8080
+  port: ${SERVER_PORT:3015}
   servlet:
     context-path: /api
 

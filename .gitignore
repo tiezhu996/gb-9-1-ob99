@@ -1,0 +1,19 @@
+# Java / Maven
+backend/target/
+*.class
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+
+# Env
+.env
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Logs
+*.log
